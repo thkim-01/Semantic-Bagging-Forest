@@ -37,11 +37,57 @@ from src.sdt.logic_refinement import (
 )
 
 
-def _load_from_dataset_config(dataset: str, target: Optional[str]):
-    """Return (csv_path, smiles_col, targets_cfg, targets) from benchmark_config."""
-    # Local import keeps this script usable from other contexts.
-    from experiments.benchmark_config import DATASET_CONFIG
+# Keep dataset-mode self-contained.
+# This mirrors the dataset list used in verify_semantic_forest_multi.py.
+DATASET_CONFIG = {
+    "bbbp": {
+        "path": "data/bbbp/BBBP.csv",
+        "smiles_col": "smiles",
+        "targets": ["p_np"],
+    },
+    "bace": {
+        "path": "data/bace/bace.csv",
+        "smiles_col": "smiles",
+        "targets": ["Class"],
+    },
+    "clintox": {
+        "path": "data/clintox/clintox.csv",
+        "smiles_col": "smiles",
+        "targets": ["CT_TOX"],
+    },
+    "hiv": {
+        "path": "data/hiv/HIV.csv",
+        "smiles_col": "smiles",
+        "targets": ["HIV_active"],
+    },
+    "tox21": {
+        "path": "data/tox21/tox21.csv",
+        "smiles_col": "smiles",
+        "targets": [
+            "NR-AR",
+            "NR-AR-LBD",
+            "NR-AhR",
+            "NR-Aromatase",
+            "NR-ER",
+            "NR-ER-LBD",
+            "NR-PPAR-gamma",
+            "SR-ARE",
+            "SR-ATAD5",
+            "SR-HSE",
+            "SR-MMP",
+            "SR-p53",
+        ],
+    },
+    "sider": {
+        "path": "data/sider/sider.csv",
+        "smiles_col": "smiles",
+        "targets": "ALL_EXCEPT_SMILES",
+    },
+}
 
+
+def _load_from_dataset_config(dataset: str, target: Optional[str]):
+    """Return (csv_path, smiles_col, targets_cfg, targets) from config."""
     if dataset not in DATASET_CONFIG:
         available = sorted(DATASET_CONFIG.keys())
         raise ValueError(
@@ -72,31 +118,39 @@ def _build_instances(
     df: pd.DataFrame,
     smiles_col: str,
     label_col: Optional[str],
+    feature_cache_path: Optional[str] = None,
 ) -> List:
-    extractor = MolecularFeatureExtractor()
-    instances = []
-    failed = 0
+    extractor = MolecularFeatureExtractor(cache_path=feature_cache_path)
+    try:
+        instances = []
+        failed = 0
 
-    for i, row in df.iterrows():
-        try:
-            smi = row[smiles_col]
-            feats = extractor.extract_features(smi)
+        for i, row in df.iterrows():
+            try:
+                smi = row[smiles_col]
+                feats = extractor.extract_features(smi)
 
-            if label_col is None:
-                label = 0
-            else:
-                label = int(row[label_col])
+                if label_col is None:
+                    label = 0
+                else:
+                    label = int(row[label_col])
 
-            inst = onto.add_molecule_instance(f"Mol_{i}", feats, label=label)
-            instances.append(inst)
-        except Exception:
-            failed += 1
-            continue
+                inst = onto.add_molecule_instance(
+                    f"Mol_{i}",
+                    feats,
+                    label=label,
+                )
+                instances.append(inst)
+            except Exception:
+                failed += 1
+                continue
 
-    if failed:
-        print(f"Skipped {failed} rows due to SMILES/feature errors")
+        if failed:
+            print(f"Skipped {failed} rows due to SMILES/feature errors")
 
-    return instances
+        return instances
+    finally:
+        extractor.close()
 
 
 def main() -> int:
@@ -142,6 +196,15 @@ def main() -> int:
         ),
     )
 
+    parser.add_argument(
+        "--feature-cache-dir",
+        default=str(Path("output") / "feature_cache"),
+        help=(
+            "Directory for persistent SMILES->features cache (SQLite). "
+            "Set to empty string to disable caching."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.csv:
@@ -172,7 +235,19 @@ def main() -> int:
         if args.limit and len(df) > args.limit:
             df = df.head(args.limit)
 
-        instances = _build_instances(onto, df, smiles_col, label_col)
+        cache_dir = str(args.feature_cache_dir).strip()
+        cache_path = None
+        if cache_dir:
+            cache_name = csv_path.stem
+            cache_path = str(Path(cache_dir) / f"{cache_name}.sqlite3")
+
+        instances = _build_instances(
+            onto,
+            df,
+            smiles_col,
+            label_col,
+            feature_cache_path=cache_path,
+        )
         if not instances:
             raise RuntimeError(
                 "No valid instances could be built from the CSV"
@@ -208,8 +283,6 @@ def main() -> int:
         return 0
 
     # Dataset mode
-    from experiments.benchmark_config import DATASET_CONFIG
-
     datasets = [args.dataset]
     if args.dataset == 'all':
         datasets = list(DATASET_CONFIG.keys())
@@ -266,11 +339,17 @@ def main() -> int:
             onto = MoleculeOntology(tmp_onto_path)
             generator = OntologyRefinementGenerator(onto)
 
+            cache_dir = str(args.feature_cache_dir).strip()
+            cache_path = None
+            if cache_dir:
+                cache_path = str(Path(cache_dir) / f"{dataset}.sqlite3")
+
             instances = _build_instances(
                 onto,
                 df_target,
                 smiles_col,
                 label_col,
+                feature_cache_path=cache_path,
             )
             if not instances:
                 continue

@@ -151,6 +151,9 @@ class OntologyRefinementGenerator:
 
         # Cache disjoint class pairs for conjunction filtering
         self._disjoint_pairs = self._build_disjoint_pairs()
+        # Cache for expensive class-membership checks
+        # Keyed by (instance_storid, concept_storid)
+        self._instance_concept_cache = {}
 
     def _build_disjoint_pairs(self) -> Set[frozenset]:
         pairs: Set[frozenset] = set()
@@ -452,24 +455,84 @@ class OntologyRefinementGenerator:
         return refs
 
     def _filter_valid_refinements(self, refinements, instances) -> List[OntologyRefinement]:
-        valid = []
+        """Keep only refinements that split the current instances.
+
+        A refinement is valid if it is satisfied by at least one instance and
+        not satisfied by at least one other instance.
+
+        This is a hot path; we short-circuit as soon as we observe both a
+        satisfying and a non-satisfying example.
+        """
+
+        n = len(instances)
+        if n <= 1:
+            return []
+
+        valid: List[OntologyRefinement] = []
         for ref in refinements:
             satisfying_count = 0
+            saw_non_satisfying = False
+
             for inst in instances:
                 if self.instance_satisfies_refinement(inst, ref):
                     satisfying_count += 1
-            
-            if 0 < satisfying_count < len(instances):
-                valid.append(ref)
+                    if saw_non_satisfying:
+                        valid.append(ref)
+                        break
+                    if satisfying_count == n:
+                        # Everyone satisfies -> not a split.
+                        break
+                else:
+                    saw_non_satisfying = True
+                    if satisfying_count > 0:
+                        valid.append(ref)
+                        break
+
         return valid
 
+    def _is_instance_of_concept(self, instance, concept) -> bool:
+        """Fast instance-of check with caching.
+
+        Using owlready2's isinstance() triggers ontology reasoning queries
+        and can be very expensive when called repeatedly.
+        """
+
+        try:
+            inst_id = instance.storid
+            concept_id = concept.storid
+            key = (inst_id, concept_id)
+        except Exception:
+            # Fallback for unexpected objects
+            return isinstance(instance, concept)
+
+        cached = self._instance_concept_cache.get(key)
+        if cached is not None:
+            return cached
+
+        # Prefer direct / indirect class membership lists.
+        try:
+            if concept in getattr(instance, "is_a", []):
+                self._instance_concept_cache[key] = True
+                return True
+
+            indirect = getattr(instance, "INDIRECT_is_a", None)
+            if indirect is not None and concept in indirect:
+                self._instance_concept_cache[key] = True
+                return True
+
+            self._instance_concept_cache[key] = False
+            return False
+        except Exception:
+            res = isinstance(instance, concept)
+            self._instance_concept_cache[key] = bool(res)
+            return bool(res)
     def instance_satisfies_refinement(self, instance, refinement: OntologyRefinement) -> bool:
         """
         Check if instance satisfies the refinement.
         Logic-based check using instance properties.
         """
         if refinement.ref_type == 'concept':
-            return isinstance(instance, refinement.concept)
+            return self._is_instance_of_concept(instance, refinement.concept)
             
         elif refinement.ref_type == 'cardinality':
             vals = getattr(instance, refinement.property, [])
@@ -487,7 +550,7 @@ class OntologyRefinementGenerator:
             # Exists prop.concept
             related_objects = getattr(instance, refinement.property, [])
             for obj in related_objects:
-                if isinstance(obj, refinement.concept):
+                if self._is_instance_of_concept(obj, refinement.concept):
                     return True
             return False
             

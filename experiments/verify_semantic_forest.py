@@ -57,6 +57,10 @@ def verify_forest():
         min_samples_leaf=5,
         class_weight='balanced',
         verbose=True,
+        learner_kwargs={
+            # Use C4.5-style gain ratio scoring for splits
+            'split_criterion': 'gain_ratio',
+        },
     )
     forest.fit(train_instances)
     
