@@ -414,6 +414,14 @@ def main():
         help="Evaluate all tasks for multi-task datasets (Tox21, SIDER).",
     )
     parser.add_argument(
+        "--datasets",
+        default=None,
+        help=(
+            "Comma-separated dataset keys to run (e.g., 'clintox' or 'tox21,sider'). "
+            "If omitted, runs all datasets."
+        ),
+    )
+    parser.add_argument(
         "--out",
         default=str(Path("output") / "semantic_forest_benchmark.csv"),
         help="Output CSV path.",
@@ -551,6 +559,20 @@ def main():
             "default_task": "Hepatobiliary disorders",
         },
     ]
+
+    if args.datasets:
+        available_keys = [d["key"] for d in datasets]
+        wanted = {
+            s.strip().lower()
+            for s in str(args.datasets).split(",")
+            if s.strip()
+        }
+        datasets = [ds for ds in datasets if ds["key"].lower() in wanted]
+        if not datasets:
+            raise ValueError(
+                f"No datasets matched --datasets={args.datasets!r}. "
+                f"Available: {available_keys}"
+            )
 
     try:
         for ds in datasets:
