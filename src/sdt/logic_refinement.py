@@ -1,7 +1,9 @@
 
-from typing import List, Tuple, Any, Set
+from typing import List, Tuple, Any, Set, Optional, Dict
 from owlready2 import *
 import itertools
+import json
+from pathlib import Path
 
 class OntologyRefinement:
     """
@@ -39,19 +41,122 @@ class OntologyRefinement:
     def __hash__(self):
         return hash((self.ref_type, self.property, self.operator, str(self.value), self.concept))
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize refinement to a JSON-friendly dict."""
+        data: Dict[str, Any] = {
+            'ref_type': self.ref_type,
+            'property': self.property,
+            'operator': self.operator,
+            'value': self.value,
+        }
+
+        if self.concept is not None:
+            data['concept_name'] = getattr(self.concept, 'name', None)
+            data['concept_iri'] = getattr(self.concept, 'iri', None)
+
+        if self.ref_type == 'conjunction':
+            # value is a tuple of sub-refinements
+            data['value'] = [r.to_dict() for r in (self.value or [])]
+
+        return data
+
+    @staticmethod
+    def _resolve_concept(onto, concept_iri: Optional[str], concept_name: Optional[str]):
+        """Resolve an OWL class in the loaded ontology."""
+        if concept_iri:
+            found = onto.search_one(iri=concept_iri)
+            if found is not None:
+                return found
+        if concept_name:
+            return getattr(onto, concept_name, None)
+        return None
+
+    @classmethod
+    def from_dict(cls, onto, data: Dict[str, Any]) -> 'OntologyRefinement':
+        """Reconstruct refinement from JSON dict using `onto` for class resolution."""
+        ref_type = data.get('ref_type')
+        prop = data.get('property')
+        operator = data.get('operator')
+        value = data.get('value')
+
+        if ref_type == 'conjunction' and isinstance(value, list):
+            sub_refs = [cls.from_dict(onto, d) for d in value]
+            return cls(ref_type='conjunction', value=tuple(sub_refs))
+
+        concept = None
+        if ref_type in ('concept', 'qualification') or data.get('concept_name'):
+            concept = cls._resolve_concept(
+                onto,
+                data.get('concept_iri'),
+                data.get('concept_name'),
+            )
+
+        return cls(
+            ref_type=ref_type,
+            property_name=prop,
+            operator=operator,
+            value=value,
+            concept=concept,
+        )
+
+
+def save_refinements_json(
+    refinements: List[OntologyRefinement],
+    out_path: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Save refinements as JSON for later reuse."""
+    payload: Dict[str, Any] = {
+        'metadata': metadata or {},
+        'refinements': [r.to_dict() for r in refinements],
+    }
+
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def load_refinements_json(onto, path: str) -> List[OntologyRefinement]:
+    """Load refinements JSON and resolve referenced concepts in `onto`."""
+    p = Path(path)
+    payload = json.loads(p.read_text(encoding='utf-8'))
+    items = payload.get('refinements', [])
+    refinements: List[OntologyRefinement] = []
+
+    for item in items:
+        ref = OntologyRefinement.from_dict(onto, item)
+        # If a concept couldn't be resolved, we still keep the refinement for
+        # numeric/domain/cardinality rules; for concept/qualification this would
+        # be unusable, so we skip those.
+        if ref.ref_type in ('concept', 'qualification') and ref.concept is None:
+            continue
+        refinements.append(ref)
+
+    return refinements
+
 
 class OntologyRefinementGenerator:
     """
     Generates candidate refinements based on the current center class and ontology structure.
     """
-    def __init__(self, ontology_manager):
+    def __init__(self, ontology_manager, static_refinements: Optional[List[OntologyRefinement]] = None):
         self.ontology_manager = ontology_manager
         self.onto = ontology_manager.onto
+
+        # If provided, these candidates are reused across runs (static mode)
+        self.static_refinements = static_refinements
+
+        # Safety knobs to avoid refinement explosion on large ontologies (e.g., DTO)
+        self.max_qualification_concepts_per_property = 50
 
     def generate_refinements(self, center_class, instances: List) -> List[OntologyRefinement]:
         """
         Generate all valid refinements for the given center class.
         """
+        # Static mode: reuse previously extracted refinements (still filter by instances)
+        if self.static_refinements is not None:
+            return self._filter_valid_refinements(self.static_refinements, instances)
+
         refinements = []
         
         # 1. Concept Constructor Refinement
@@ -67,11 +172,11 @@ class OntologyRefinementGenerator:
         
         # 4. Qualification Refinement
         # Object properties range subclasses
-        refinements.extend(self._generate_qualification_refinements(center_class))
+        refinements.extend(self._generate_qualification_refinements(center_class, instances))
         
         # 5. Conjunction Refinement
         # Intersection of non-disjoint subclasses
-        refinements.extend(self._generate_conjunction_refinements(center_class))
+        refinements.extend(self._generate_conjunction_refinements(center_class, instances))
         
         # Filter valid refinements (must split instances)
         valid_refinements = self._filter_valid_refinements(refinements, instances)
@@ -143,32 +248,63 @@ class OntologyRefinementGenerator:
                 
         return refs
 
-    def _generate_qualification_refinements(self, center_class) -> List[OntologyRefinement]:
-        refs = []
-        # Check object properties range
-        # For 'hasSubstructure', range is 'Substructure'
-        # Generate refinements for subclasses of Range (e.g., hasSubstructure.BenzeneRing)
-        
+    def _generate_qualification_refinements(self, center_class, instances: List) -> List[OntologyRefinement]:
+        """
+        Qualification refinement: Exists(R.C) where
+        - R is an ObjectProperty
+        - C is a class (concept)
+
+        To keep this practical on large ontologies (e.g., DTO.owl), we derive candidate
+        concepts from *what we actually observe* in the current instance set.
+        """
+        refs: List[OntologyRefinement] = []
+
         target_props = list(self.onto.object_properties())
         for prop in target_props:
-             # Basic implementation: Iterate pre-defined range classes or check property definition
-             # Using hardcoded knowledge for safe execution in this demo
-             if prop.name in ['hasSubstructure', 'hasFunctionalGroupRel', 'hasRingSystem']:
-                 # Get range class
-                 ranges = prop.range
-                 if not ranges: continue
-                 range_class = ranges[0] # Assume single range
-                 
-                 # Recurse subclasses of range
-                 if hasattr(range_class, 'subclasses'):
-                     for sub in range_class.subclasses():
-                         refs.append(OntologyRefinement('qualification', property_name=prop.name, concept=sub))
-                         # Deep traversal? Maybe just 1 level for now
-                         for subsub in sub.subclasses():
-                             refs.append(OntologyRefinement('qualification', property_name=prop.name, concept=subsub))
+            observed_concepts: Set[Any] = set()
+
+            for inst in instances:
+                related_objects = getattr(inst, prop.name, [])
+                if not related_objects:
+                    continue
+
+                for obj in related_objects:
+                    # owlready2 individuals keep asserted types in .is_a (classes + restrictions)
+                    for t in getattr(obj, 'is_a', []):
+                        # Keep only OWL classes (ThingClass), not restrictions
+                        if hasattr(t, 'name') and hasattr(t, 'ancestors'):
+                            observed_concepts.add(t)
+                            # Also allow generalization (ancestors) for more usable splits
+                            for anc in getattr(t, 'ancestors', lambda: [])():
+                                if hasattr(anc, 'name') and hasattr(anc, 'ancestors'):
+                                    if anc.name != 'Thing':
+                                        observed_concepts.add(anc)
+
+            # Bound per property to avoid combinatorial blow-up
+            observed_concepts = {
+                c for c in observed_concepts
+                if getattr(c, 'name', None) not in (None, 'Thing')
+            }
+
+            if not observed_concepts:
+                continue
+
+            concepts_sorted = sorted(
+                observed_concepts,
+                key=lambda c: (str(getattr(c, 'name', '')))
+            )
+            for concept in concepts_sorted[: self.max_qualification_concepts_per_property]:
+                refs.append(
+                    OntologyRefinement(
+                        'qualification',
+                        property_name=prop.name,
+                        concept=concept,
+                    )
+                )
+
         return refs
 
-    def _generate_conjunction_refinements(self, center_class) -> List[OntologyRefinement]:
+    def _generate_conjunction_refinements(self, center_class, instances) -> List[OntologyRefinement]:
         """
         Generate intersection of refinements.
         Strategy: Combine Concept Refinements with Domain/Qualification Refinements.
@@ -178,15 +314,11 @@ class OntologyRefinementGenerator:
         
         # 1. Get base refinements
         concepts = self._generate_concept_refinements(center_class)
-        qualifications = self._generate_qualification_refinements(center_class)
-        # We need instances for domain/cardinality, but we don't have them here explicitly passed?
-        # Fixed API: Pass instances to this method?
-        # The main generate_refinements calls this. I need to update signature.
+        qualifications = self._generate_qualification_refinements(center_class, instances)
         
         # For now, let's just combine Concept + Qualification (Structural Conjunction)
         # e.g. IsA(Aromatic) AND Exists(hasSubstructure.Alcohol)
         
-        import itertools
         if not concepts or not qualifications:
             return []
             

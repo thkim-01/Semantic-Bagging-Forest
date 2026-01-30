@@ -1,7 +1,7 @@
 """
 Molecule Ontology: 화학 온톨로지 구조 정의
 """
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 from owlready2 import *
 import os
 
@@ -9,158 +9,150 @@ import os
 class MoleculeOntology:
     """화학 분자 온톨로지를 관리하는 클래스"""
     
-    def __init__(self, ontology_path: str = "molecule_ontology.owl"):
+    def __init__(
+        self,
+        ontology_path: str = "ontology/DTO.xrdf",
+        base_dto_path: Optional[str] = None,
+    ):
+        """
+        Args:
+            ontology_path: 작업용/저장용 온톨로지 파일 경로.
+                - 파일이 이미 존재하면 해당 파일을 로드합니다.
+                - 파일이 없으면 base DTO(기본: DTO.owl 또는 DTO.xrdf)를 로드한 뒤
+                  확장합니다.
+            base_dto_path: 신규 온톨로지 생성 시 기반으로 사용할 DTO 파일 경로(선택).
+        """
+
+        # Target ontology path (workspace-specific ontology for the dataset)
         self.ontology_path = ontology_path
+        self.base_dto_path = (
+            base_dto_path or self._resolve_default_base_dto_path()
+        )
         self.onto = None
-        self._create_ontology()
+        self._load_and_enrich_ontology()
+
+    @staticmethod
+    def _resolve_default_base_dto_path() -> Optional[str]:
+        """Prefer DTO.owl, fall back to DTO.xrdf if present."""
+        candidates = [
+            os.path.join("ontology", "DTO.owl"),
+            os.path.join("ontology", "DTO.xrdf"),
+            os.path.join("ontology", "DTO.xml"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+        return None
     
-    def _create_ontology(self):
-        """온톨로지 생성 및 기본 구조 정의"""
-        self.onto = get_ontology("http://www.semanticweb.org/molecule/ontology")
+    def _load_and_enrich_ontology(self):
+        """Load DTO and inject Chemical Ontology structure"""
         
+        # 1. Load an ontology
+        # - If ontology_path already exists (previously generated dataset ontology), load it.
+        # - Otherwise, load base DTO.owl (or DTO.xrdf) and extend it.
+        loaded_from = None
+        if os.path.exists(self.ontology_path):
+            loaded_from = self.ontology_path
+        elif self.base_dto_path and os.path.exists(self.base_dto_path):
+            loaded_from = self.base_dto_path
+
+        if loaded_from:
+            print(f"Loading base ontology from {loaded_from}...")
+            try:
+                self.onto = get_ontology(loaded_from).load()
+            except Exception as e:
+                print(
+                    f"Failed to load ontology from {loaded_from}: {e}. Creating new."
+                )
+                self.onto = get_ontology("http://www.semanticweb.org/molecule/ontology")
+        else:
+            print("No ontology file found. Creating new ontology base.")
+            self.onto = get_ontology("http://www.semanticweb.org/molecule/ontology")
+            
+        # 2. Enrich with Chemical Classes
         with self.onto:
-            # Center Class 정의
-            class Molecule(Thing):
-                """중심 클래스: 분자"""
-                pass
-            
-            # Subclasses for refinement
-            class AromaticMolecule(Molecule):
-                """방향족 분자"""
-                pass
-            
-            class NonAromaticMolecule(Molecule):
-                """비방향족 분자"""
-                pass
-            
-            # --- New Ontology Structure for True SDT ---
-            
-            # 1. Define Substructure Class Hierarchy
-            class Substructure(Thing):
-                """화학적 부분 구조 (부모 클래스)"""
-                pass
+            # Check if classes already exist to avoid duplication if re-loading
+            if not self.onto['Molecule']:
+                class Molecule(Thing):
+                    """Center Class: Molecule (Enriched into DTO)"""
+                    pass
+            else:
+                Molecule = self.onto.Molecule
 
-            class FunctionalGroup(Substructure):
-                """작용기"""
-                pass
+            # Helper to safely creation
+            def get_or_create(name, parent):
+                c = self.onto[name]
+                if not c:
+                    with self.onto:
+                        return type(name, (parent,), {})
+                return c
             
-            class RingSystem(Substructure):
-                """고리 시스템"""
-                pass
+            self.AromaticMolecule = get_or_create('AromaticMolecule', Molecule)
+            self.NonAromaticMolecule = get_or_create('NonAromaticMolecule', Molecule)
             
-            # Specific Functional Groups (Subclasses)
-            class Alcohol(FunctionalGroup): pass
-            class Amine(FunctionalGroup): pass
-            class Carboxyl(FunctionalGroup): pass
-            class Carbonyl(FunctionalGroup): pass
-            class Ether(FunctionalGroup): pass
-            class Ester(FunctionalGroup): pass
-            class Amide(FunctionalGroup): pass
-            class Nitro(FunctionalGroup): pass
-            class Halogen(FunctionalGroup): pass
+            self.Substructure = get_or_create('Substructure', Thing)
+            self.FunctionalGroup = get_or_create('FunctionalGroup', self.Substructure)
+            self.RingSystem = get_or_create('RingSystem', self.Substructure)
             
-            # Specific Ring Systems
-            class BenzeneRing(RingSystem): pass
-            class Heterocycle(RingSystem): pass
+            # Functionals
+            groups = ['Alcohol', 'Amine', 'Carboxyl', 'Carbonyl', 'Ether', 'Ester', 'Amide', 'Nitro', 'Halogen']
+            for g in groups:
+                 setattr(self, g, get_or_create(g, self.FunctionalGroup))
+            
+            # Rings
+            self.BenzeneRing = get_or_create('BenzeneRing', self.RingSystem)
+            self.Heterocycle = get_or_create('Heterocycle', self.RingSystem)
 
-            # 2. Define Object Properties
-            class hasSubstructure(Molecule >> Substructure):
-                """Molecules have substructures"""
-                pass
-            
-            class hasFunctionalGroupRel(hasSubstructure): # Sub-property
-                """Relationship to functional groups"""
-                range = [FunctionalGroup]
-                pass
+            # Properties
+            # We use 'search' or just define. Ideally unique names.
+            with self.onto:
+                class hasSubstructure(Molecule >> self.Substructure): pass
+                class hasFunctionalGroupRel(hasSubstructure): range = [self.FunctionalGroup]
+                class hasRingSystem(hasSubstructure): range = [self.RingSystem]
+                
+                # Data Properties
+                if not self.onto['hasMolecularWeight']:
+                    class hasMolecularWeight(Molecule >> float): pass
+                    class hasNumAtoms(Molecule >> int): pass
+                    class hasNumHeavyAtoms(Molecule >> int): pass
+                    class hasNumRotatableBonds(Molecule >> int): pass
+                    class hasNumHBA(Molecule >> int): pass
+                    class hasNumHBD(Molecule >> int): pass
+                    class hasNumRings(Molecule >> int): pass
+                    class hasNumAromaticRings(Molecule >> int): pass
+                    class hasAromaticity(Molecule >> bool): pass
+                    class hasLogP(Molecule >> float): pass
+                    class hasTPSA(Molecule >> float): pass
+                    class obeysLipinski(Molecule >> bool): pass
+                    class hasMWCategory(Molecule >> str): pass
+                    class hasLogPCategory(Molecule >> str): pass
+                    class hasTPSACategory(Molecule >> str): pass
+                    class hasLabel(Molecule >> int): pass
 
-            class hasRingSystem(hasSubstructure): # Sub-property
-                """Relationship to ring systems"""
-                range = [RingSystem]
-                pass
-
-            # Data Properties (Legacy retained for hybrid approach)
-            class hasMolecularWeight(Molecule >> float):
-                pass
-            
-            class hasNumAtoms(Molecule >> int):
-                pass
-            
-            class hasNumHeavyAtoms(Molecule >> int):
-                pass
-            
-            class hasNumRotatableBonds(Molecule >> int):
-                pass
-            
-            class hasNumHBA(Molecule >> int):
-                """Hydrogen Bond Acceptor 수"""
-                pass
-            
-            class hasNumHBD(Molecule >> int):
-                """Hydrogen Bond Donor 수"""
-                pass
-            
-            class hasNumRings(Molecule >> int):
-                pass
-            
-            class hasNumAromaticRings(Molecule >> int):
-                pass
-            
-            class hasAromaticity(Molecule >> bool):
-                pass
-            
-            class hasLogP(Molecule >> float):
-                pass
-            
-            class hasTPSA(Molecule >> float):
-                """Topological Polar Surface Area"""
-                pass
-            
-            class obeysLipinski(Molecule >> bool):
-                pass
-            
-            class hasMWCategory(Molecule >> str):
-                """Molecular Weight Category: Low, Medium, High"""
-                pass
-            
-            class hasLogPCategory(Molecule >> str):
-                """LogP Category: Hydrophilic, Moderate, Lipophilic"""
-                pass
-            
-            class hasTPSACategory(Molecule >> str):
-                """TPSA Category: Low, Medium, High"""
-                pass
-            
-            # Legacy string property (optional to keep or remove if fully successfully replaced)
-            class hasFunctionalGroup(Molecule >> str):
-                """Functional Group 포함 여부 (Legacy String-based)"""
-                pass
-            
-            class hasLabel(Molecule >> int):
-                """Target label: 0 or 1"""
-                pass
-        
+        # Expose
         self.Molecule = Molecule
-        self.AromaticMolecule = AromaticMolecule
-        self.NonAromaticMolecule = NonAromaticMolecule
-        self.Substructure = Substructure
-        self.FunctionalGroup = FunctionalGroup
-        self.RingSystem = RingSystem
-        self.hasSubstructure = hasSubstructure
-        self.hasFunctionalGroupRel = hasFunctionalGroupRel
-        self.hasRingSystem = hasRingSystem
-
+        self.AromaticMolecule = self.AromaticMolecule
+        self.NonAromaticMolecule = self.NonAromaticMolecule
+        self.Substructure = self.Substructure
+        self.FunctionalGroup = self.FunctionalGroup
+        self.RingSystem = self.RingSystem
+        
+        self.hasSubstructure = self.onto.hasSubstructure
+        self.hasFunctionalGroupRel = self.onto.hasFunctionalGroupRel
+        self.hasRingSystem = self.onto.hasRingSystem
+        
         # Expose subclasses
-        self.Alcohol = Alcohol
-        self.Amine = Amine
-        self.Carboxyl = Carboxyl
-        self.Carbonyl = Carbonyl
-        self.Ether = Ether
-        self.Ester = Ester
-        self.Amide = Amide
-        self.Nitro = Nitro
-        self.Halogen = Halogen
-        self.BenzeneRing = BenzeneRing
-        self.Heterocycle = Heterocycle
+        self.Alcohol = self.onto.Alcohol
+        self.Amine = self.onto.Amine
+        self.Carboxyl = self.onto.Carboxyl
+        self.Carbonyl = self.onto.Carbonyl
+        self.Ether = self.onto.Ether
+        self.Ester = self.onto.Ester
+        self.Amide = self.onto.Amide
+        self.Nitro = self.onto.Nitro
+        self.Halogen = self.onto.Halogen
+        self.BenzeneRing = self.onto.BenzeneRing
+        self.Heterocycle = self.onto.Heterocycle
     
     def add_molecule_instance(self, mol_id: str, features: Dict, label: int):
         """분자 인스턴스를 온톨로지에 추가"""
@@ -184,9 +176,6 @@ class MoleculeOntology:
             mol_instance.hasLogPCategory = [features['logp_category']]
             mol_instance.hasTPSACategory = [features['tpsa_category']]
             
-            # Functional groups (Legacy)
-            for fg in features['functional_groups']:
-                mol_instance.hasFunctionalGroup.append(fg)
             
             # --- Populate Object Properties for True SDT ---
             # Map string features to Ontology Classes
@@ -210,8 +199,9 @@ class MoleculeOntology:
                     # Create an anonymous instance of the functional group
                     # or a specific one if we want to track unique groups.
                     # For SDT, existence is usually enough, so we create a distinct instance per molecule
-                    fg_instance = fg_class()
-                    mol_instance.hasFunctionalGroupRel.append(fg_instance)
+                    if fg_class:
+                        fg_instance = fg_class()
+                        mol_instance.hasFunctionalGroupRel.append(fg_instance)
                     
             # Aromatic Rings
             if features['has_aromatic']:

@@ -1,6 +1,7 @@
 
+import argparse
+from pathlib import Path
 import pandas as pd
-import numpy as np
 import os
 from src.ontology.molecule_ontology import MoleculeOntology
 from src.ontology.smiles_converter import MolecularFeatureExtractor
@@ -11,10 +12,21 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+)
 logger = logging.getLogger(__name__)
 
-def verify_dataset(name, csv_path, label_col, smiles_col='smiles'):
+
+def verify_dataset(
+    name,
+    csv_path,
+    label_col,
+    smiles_col='smiles',
+    refinement_mode: str = 'dynamic',
+    refinement_file: str = '',
+):
     logger.info(f"\n{'='*50}\nStarting Benchmark for {name}\n{'='*50}")
 
     # 1. Load Data
@@ -44,7 +56,11 @@ def verify_dataset(name, csv_path, label_col, smiles_col='smiles'):
     logger.info(f"Loaded {len(df_sample)} samples.")
 
     # Split
-    train_df, test_df = train_test_split(df_sample, test_size=0.3, random_state=42)
+    train_df, test_df = train_test_split(
+        df_sample,
+        test_size=0.3,
+        random_state=42,
+    )
     logger.info(f"Train size: {len(train_df)}, Test size: {len(test_df)}")
 
     # ---------------------------------------------------------
@@ -68,10 +84,14 @@ def verify_dataset(name, csv_path, label_col, smiles_col='smiles'):
                 mol_id = f"Mol_{name}_{subset_name}_{idx}"
                 label_val = int(row[label_col])
                 
-                inst = onto.add_molecule_instance(mol_id, feats, label=label_val)
+                inst = onto.add_molecule_instance(
+                    mol_id,
+                    feats,
+                    label=label_val,
+                )
                 instances.append(inst)
                 valid_indices.append(idx)
-            except Exception as e:
+            except Exception:
                 pass
         return instances, valid_indices
 
@@ -81,7 +101,16 @@ def verify_dataset(name, csv_path, label_col, smiles_col='smiles'):
     
     logger.info(f"[{name}] Training Logic SDT...")
     # Using previous optimal params or standard
-    logic_learner = LogicSDTLearner(onto, max_depth=7, min_samples_split=20, min_samples_leaf=10, class_weight='balanced', verbose=False)
+    logic_learner = LogicSDTLearner(
+        onto,
+        max_depth=7,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        class_weight='balanced',
+        verbose=False,
+        refinement_mode=refinement_mode,
+        refinement_file=refinement_file,
+    )
     logic_tree = logic_learner.fit(train_instances)
 
     # Predict Logic
@@ -91,7 +120,10 @@ def verify_dataset(name, csv_path, label_col, smiles_col='smiles'):
         for inst in instances:
             node = tree.root
             while not node.is_leaf:
-                if logic_learner.refinement_generator.instance_satisfies_refinement(inst, node.refinement):
+                if logic_learner.refinement_generator.instance_satisfies_refinement(
+                    inst,
+                    node.refinement,
+                ):
                     node = node.left_child
                 else:
                     node = node.right_child
@@ -106,10 +138,11 @@ def verify_dataset(name, csv_path, label_col, smiles_col='smiles'):
     
     try:
         logic_auc = roc_auc_score(test_labels, logic_probs)
-    except:
-        logic_auc = 0.5 # Single class case
+    except ValueError:
+        logic_auc = 0.5  # Single class case
         
     logic_acc = accuracy_score(test_labels, logic_preds)
+    logger.info(f"[{name}] Logic Accuracy: {logic_acc:.4f}")
     
     # ---------------------------------------------------------
     # PART B: Legacy SDT
@@ -177,9 +210,10 @@ def verify_dataset(name, csv_path, label_col, smiles_col='smiles'):
     legacy_preds, legacy_probs = predict_legacy(legacy_tree, legacy_test_data)
     try:
         legacy_auc = roc_auc_score(legacy_test_labels, legacy_probs)
-    except:
+    except ValueError:
         legacy_auc = 0.5
     legacy_acc = accuracy_score(legacy_test_labels, legacy_preds)
+    logger.info(f"[{name}] Legacy Accuracy: {legacy_acc:.4f}")
 
     logger.info(f"[{name}] Logic AUC: {logic_auc:.4f} | Legacy AUC: {legacy_auc:.4f}")
     
@@ -191,10 +225,45 @@ def verify_dataset(name, csv_path, label_col, smiles_col='smiles'):
     }
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Verify Logic SDT on multiple datasets")
+    parser.add_argument(
+        "--refinement-mode",
+        choices=["dynamic", "static"],
+        default="dynamic",
+        help="Use dynamic generation or reuse saved refinements (static).",
+    )
+    parser.add_argument(
+        "--refinement-base-dir",
+        default=str(Path("output") / "dto_refinements"),
+        help=(
+            "Base dir containing per-dataset refinement JSON files, e.g. "
+            "output/dto_refinements/<dataset>/<target>.json"
+        ),
+    )
+    args = parser.parse_args()
+
     datasets = [
-        {'name': 'BACE', 'path': 'data/bace/bace.csv', 'label': 'Class', 'smiles': 'mol'},
-        {'name': 'ClinTox', 'path': 'data/clintox/clintox.csv', 'label': 'CT_TOX', 'smiles': 'smiles'},
-        {'name': 'HIV', 'path': 'data/hiv/HIV.csv', 'label': 'HIV_active', 'smiles': 'smiles'}
+        {
+            'name': 'BACE',
+            'key': 'bace',
+            'path': 'data/bace/bace.csv',
+            'label': 'Class',
+            'smiles': 'mol',
+        },
+        {
+            'name': 'ClinTox',
+            'key': 'clintox',
+            'path': 'data/clintox/clintox.csv',
+            'label': 'CT_TOX',
+            'smiles': 'smiles',
+        },
+        {
+            'name': 'HIV',
+            'key': 'hiv',
+            'path': 'data/hiv/HIV.csv',
+            'label': 'HIV_active',
+            'smiles': 'smiles',
+        },
     ]
     
     results = []
@@ -202,7 +271,30 @@ if __name__ == "__main__":
         f.write("Dataset,LogicAUC,LegacyAUC,Delta\n")
         
         for ds in datasets:
-            res = verify_dataset(ds['name'], ds['path'], ds['label'], ds['smiles'])
+            refinement_file = ''
+            if args.refinement_mode == 'static':
+                refinement_file = str(
+                    Path(args.refinement_base_dir)
+                    / ds['key']
+                    / f"{ds['label']}.json"
+                )
+                if not Path(refinement_file).exists():
+                    logger.error(
+                        "Missing refinement file for %s/%s: %s",
+                        ds['key'],
+                        ds['label'],
+                        refinement_file,
+                    )
+                    continue
+
+            res = verify_dataset(
+                ds['name'],
+                ds['path'],
+                ds['label'],
+                ds['smiles'],
+                refinement_mode=args.refinement_mode,
+                refinement_file=refinement_file,
+            )
             if res:
                 results.append(res)
                 line = f"{res['dataset']},{res['logic_auc']:.4f},{res['legacy_auc']:.4f},{res['delta']:.4f}"

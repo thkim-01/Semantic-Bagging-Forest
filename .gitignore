@@ -19,6 +19,9 @@ Thumbs.db
 
 # Semantic Decision Tree artifacts
 ontology/temp_*.owl
+ontology/_tmp_dto_extract_*.owl
+*_logic_test.owl
+bbbp_logic_test.owl
 *_results.txt
 *.log
 experiments/__pycache__/
@@ -32,3 +35,9 @@ forest_results.txt
 multi_benchmark_results.txt
 optimization_results.txt
 verify_error.txt
+
+# Generated outputs
+output/
+
+# Local run logs
+DTO_verification.txt

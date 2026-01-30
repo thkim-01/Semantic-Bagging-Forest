@@ -29,7 +29,6 @@ def test_ontology():
     mol = onto_manager.add_molecule_instance("TestMol_1", features, label=1)
     
     print(f"Molecule created: {mol}")
-    print(f"Functional Groups (Legacy): {mol.hasFunctionalGroup}")
     print(f"Substructures (Object Property - hasSubstructure): {mol.hasSubstructure}")
     print(f"Functional Groups (Object Property - hasFunctionalGroupRel): {mol.hasFunctionalGroupRel}")
     

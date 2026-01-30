@@ -1,4 +1,6 @@
 
+import argparse
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from src.ontology.molecule_ontology import MoleculeOntology
@@ -13,7 +15,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def verify_bbbp_logic_sdt():
+def verify_bbbp_logic_sdt(refinement_mode: str, refinement_file: str):
     logger.info("Starting BBBP Logic SDT Verification...")
 
     # 1. Load Data
@@ -68,7 +70,16 @@ def verify_bbbp_logic_sdt():
     # Train Logic SDT
     logger.info("Training Logic SDT...")
     # Using strict depth/split to force logic discovery
-    logic_learner = LogicSDTLearner(onto, max_depth=7, min_samples_split=20, min_samples_leaf=10, class_weight='balanced', verbose=False)
+    logic_learner = LogicSDTLearner(
+        onto,
+        max_depth=7,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        class_weight='balanced',
+        verbose=False,
+        refinement_mode=refinement_mode,
+        refinement_file=refinement_file,
+    )
     logic_tree = logic_learner.fit(train_instances)
 
     # Predict Logic SDT
@@ -243,4 +254,25 @@ def traverse(node, indent=0):
         traverse(node.right_child, indent + 1)
 
 if __name__ == "__main__":
-    verify_bbbp_logic_sdt()
+    parser = argparse.ArgumentParser(description="Verify Logic SDT on BBBP")
+    parser.add_argument(
+        "--refinement-mode",
+        choices=["dynamic", "static"],
+        default="dynamic",
+        help="Use dynamic generation or reuse saved refinements (static).",
+    )
+    parser.add_argument(
+        "--refinement-file",
+        default=str(Path("output") / "dto_refinements" / "bbbp" / "p_np.json"),
+        help="Path to saved refinements JSON (required for static mode).",
+    )
+    args = parser.parse_args()
+
+    if args.refinement_mode == "static" and not Path(args.refinement_file).exists():
+        logger.error(
+            "Static mode requested but refinement file not found: %s",
+            args.refinement_file,
+        )
+        raise SystemExit(2)
+
+    verify_bbbp_logic_sdt(args.refinement_mode, args.refinement_file)
