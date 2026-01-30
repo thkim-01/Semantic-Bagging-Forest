@@ -53,7 +53,7 @@ DATASET_CONFIG = {
     "clintox": {
         "path": "data/clintox/clintox.csv",
         "smiles_col": "smiles",
-        "targets": ["CT_TOX"],
+        "targets": ["CT_TOX", "FDA_APPROVED"],
     },
     "hiv": {
         "path": "data/hiv/HIV.csv",

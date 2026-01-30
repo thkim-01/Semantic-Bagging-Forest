@@ -427,6 +427,24 @@ def main():
             "If omitted, uses '<out>_avg.csv'."
         ),
     )
+
+    parser.add_argument(
+        "--run-message",
+        default=None,
+        help=(
+            "Override the commit_message written to result CSVs. "
+            "Useful when you pre-decide the commit message and want the CSV "
+            "to match it 1:1."
+        ),
+    )
+    parser.add_argument(
+        "--run-sha",
+        default=None,
+        help=(
+            "Override the commit_sha written to result CSVs. "
+            "Normally detected from git; only set this if you know what you're doing."
+        ),
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -443,6 +461,10 @@ def main():
     args = parser.parse_args()
 
     commit_sha, commit_msg = _get_git_commit_info()
+    if args.run_sha is not None:
+        commit_sha = str(args.run_sha)
+    if args.run_message is not None:
+        commit_msg = str(args.run_message)
 
     out_path = Path(args.out)
     out_avg_path = (
@@ -489,7 +511,8 @@ def main():
             "name": "ClinTox",
             "path": "data/clintox/clintox.csv",
             "smiles": "smiles",
-            "tasks": ["CT_TOX"],
+            "tasks": ["CT_TOX", "FDA_APPROVED"],
+            "default_task": "CT_TOX",
         },
         {
             "key": "hiv",
